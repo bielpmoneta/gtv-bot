@@ -22,6 +22,9 @@ EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
 # Nome da instância que você criou no Manager (ex: "gtv-bot")
 EVOLUTION_INSTANCE_NAME = os.getenv("EVOLUTION_INSTANCE_NAME", "")
 
+# API key openai
+API_KEY_OPENAI = os.getenv("API_KEY_OPENAI", "")
+
 # Validação simples: se alguma variável essencial estiver faltando, o app já avisa no console em vez de falhar silenciosamente depois.
 if not EVOLUTION_API_KEY:
     print("[AVISO] EVOLUTION_API_KEY não está definida no .env")

@@ -4,7 +4,7 @@ carrega para subir o servidor (uvicorn app.main:app --reload).
 """
 
 from fastapi import FastAPI
-from app.routes import webhook
+from src import webhook
 
 app = FastAPI(title="GTV Bot")
 
