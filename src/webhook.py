@@ -5,7 +5,7 @@ o pipeline RAG, e manda a resposta de volta para o WhatsApp do usuário.
 
 from fastapi import APIRouter, Request
 from src.rag_pipeline import answer_question, precisa_de_atendente_humano
-from src.evolution_client import enviar_mensagem
+from src.client import enviar_mensagem
 
 router = APIRouter()
 

@@ -23,7 +23,7 @@ EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
 EVOLUTION_INSTANCE_NAME = os.getenv("EVOLUTION_INSTANCE_NAME", "")
 
 # API key openai
-API_KEY_OPENAI = os.getenv("API_KEY_OPENAI", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # Validação simples: se alguma variável essencial estiver faltando, o app já avisa no console em vez de falhar silenciosamente depois.
 if not EVOLUTION_API_KEY:

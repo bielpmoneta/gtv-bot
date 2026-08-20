@@ -23,4 +23,5 @@ __pycache__/
 Thumbs.db
 
 # Data
+data/*
 data/pdfs/*

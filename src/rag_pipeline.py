@@ -18,8 +18,8 @@ from config.config import OPENAI_API_KEY
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 
 PASTA_INDICE = "data/faiss_index"
@@ -61,7 +61,7 @@ system_prompt = (
     "não invente nem complete informações que não estejam explicitamente "
     f"no contexto. Se a resposta não estiver clara no contexto, responda "
     f"exatamente '{MARCADOR_NAO_SEI}' e nada mais — sem explicações extras. "
-    "Quando conseguir responder, seja direto e conciso, no máximo 3 frases."
+    "Quando conseguir responder, seja direto e conciso, no máximo 5 frases."
     "\n\n"
     "Contexto:\n{context}"
 )
