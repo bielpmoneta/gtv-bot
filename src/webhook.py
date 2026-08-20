@@ -1,46 +1,62 @@
 """
-Rota responsável por receber os eventos que a Evolution API envia
-via webhook (mensagens recebidas, atualizações de status, etc).
-
-Por enquanto, essa rota só IMPRIME o payload no console.
-O objetivo dessa etapa é você enxergar o formato real que a Evolution
-API manda, antes de escrever qualquer lógica de negócio em cima disso.
+Rota que recebe os eventos da Evolution API, gera a resposta usando
+o pipeline RAG, e manda a resposta de volta para o WhatsApp do usuário.
 """
 
 from fastapi import APIRouter, Request
-import json
+from src.rag_pipeline import answer_question, precisa_de_atendente_humano
+from src.evolution_client import enviar_mensagem
 
 router = APIRouter()
 
+# Controle simples de quem está em standby aguardando atendente humano.
+# ATENÇÃO: isso é só um placeholder por enquanto — é um dicionário em
+# memória, então some se o servidor reiniciar, e não tem timeout ainda.
+# O próximo passo do roteiro (handoff humano de verdade) troca isso
+# por uma tabela no banco de dados.
+usuarios_em_standby: dict[str, bool] = {}
+
+MENSAGEM_TRANSFERENCIA = (
+    "Não encontrei essa informação nos documentos do GTV. "
+    "Vou te transferir para um atendente humano, só um momento."
+)
+
+
 @router.post("/webhook")
 async def receber_webhook(request: Request):
-    # Pega o corpo da requisição como JSON (dict Python)
     payload = await request.json()
-
-    # Imprime formatado (indent=2) pra ficar legível no terminal
-    print("\n===== NOVO EVENTO RECEBIDO =====")
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
-    print("=================================\n")
-
-    # A Evolution API sempre manda um campo "event" identificando
-    # o tipo de evento. O que mais nos interessa por enquanto é
-    # "messages.upsert" (nova mensagem recebida).
     evento = payload.get("event")
 
-    if evento == "messages.upsert":
-        # A estrutura real da mensagem vem dentro de "data".
-        # Isso pode variar um pouco dependendo da versão da Evolution API,
-        # por isso usamos .get() em vez de acesso direto com [] —
-        # assim, se algum campo não existir, não quebra a aplicação.
-        dados = payload.get("data", {})
+    if evento != "messages.upsert":
+        # Outros eventos (status de conexão, confirmação de leitura, etc)
+        # não interessam pro chatbot por enquanto.
+        return {"status": "ignorado"}
 
-        numero_remetente = dados.get("key", {}).get("remoteJid")
-        texto_mensagem = dados.get("message", {}).get("conversation")
+    dados = payload.get("data", {})
 
-        print(f"Número: {numero_remetente}")
-        print(f"Mensagem: {texto_mensagem}")
+    numero_remetente = dados.get("key", {}).get("remoteJid")
+    texto_mensagem = dados.get("message", {}).get("conversation")
 
-    # A Evolution API espera algum retorno HTTP 200 para saber que
-    # recebemos o evento com sucesso. O conteúdo do retorno não importa
-    # muito aqui, mas é boa prática sempre devolver algo.
-    return {"status": "recebido"}
+    # Mensagens sem texto (áudio, imagem, figurinha) ou sem remetente
+    # identificável não têm o que processar por enquanto.
+    if not numero_remetente or not texto_mensagem:
+        return {"status": "ignorado"}
+
+    # Ignora mensagens enviadas pelo próprio bot (eco), evitando loop.
+    if dados.get("key", {}).get("fromMe"):
+        return {"status": "ignorado"}
+
+    # Se o usuário já está em standby aguardando humano, o bot não
+    # responde mais nessa conversa — só um humano assume a partir daqui.
+    if usuarios_em_standby.get(numero_remetente):
+        return {"status": "em_standby"}
+
+    resposta = answer_question(texto_mensagem)
+
+    if precisa_de_atendente_humano(resposta):
+        usuarios_em_standby[numero_remetente] = True
+        enviar_mensagem(numero_remetente, MENSAGEM_TRANSFERENCIA)
+        return {"status": "transferido_para_humano"}
+
+    enviar_mensagem(numero_remetente, resposta)
+    return {"status": "respondido"}
