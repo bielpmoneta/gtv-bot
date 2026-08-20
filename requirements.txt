@@ -1,3 +1,16 @@
 fastapi
 uvicorn
 python-dotenv
+transformers
+openai
+langchain
+langchain_community
+pypdf2
+pdfminer.six
+faiss-cpu
+python-dotenv
+torch
+pydantic
+langchain_openai
+langchain_text_splitters
+langchain_core
