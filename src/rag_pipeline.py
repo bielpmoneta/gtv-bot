@@ -1,97 +1,366 @@
 """
-Pipeline de RAG (Retrieval-Augmented Generation).
+Pipeline de RAG do GTV.
 
-IMPORTANTE — leia antes de mexer:
-Tudo que está FORA da função answer_question() roda UMA VEZ SÓ,
-no momento em que esse módulo é importado (ex: quando o FastAPI sobe).
-Isso inclui carregar o índice e montar a chain do LangChain.
+Fluxo:
 
-A função answer_question() é a ÚNICA coisa que roda a cada pergunta —
-e ela só faz busca no índice já carregado + uma chamada ao LLM.
-Isso é o que evita gastar tokens/reprocessamento à toa.
-
-Pré-requisito: rodar "python -m src.build_index" pelo menos uma vez
-antes de usar esse módulo (precisa existir a pasta data/faiss_index).
+Pergunta
+    ↓
+Busca semântica FAISS
+    ↓
+Busca textual
+    ↓
+Combinação dos resultados
+    ↓
+LLM
+    ↓
+Resposta / NAO_SEI
 """
 
+import re
+
 from config.config import OPENAI_API_KEY
+
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+
+from langchain_classic.chains.combine_documents import (
+    create_stuff_documents_chain
+)
+
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 
-PASTA_INDICE = "data/faiss_index"
-NOME_MODELO_EMBEDDING = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
-# Texto sentinela que o LLM retorna quando não encontra a resposta
-# no contexto. O webhook usa isso para decidir se aciona o atendente humano.
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+PASTA_INDICE = "data/faiss_index"
+
+NOME_MODELO_EMBEDDING = (
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+
 MARCADOR_NAO_SEI = "NAO_SEI"
 
-# ---------------------------------------------------------------
-# Tudo abaixo roda UMA VEZ, na importação do módulo (não a cada pergunta)
-# ---------------------------------------------------------------
+# Quantos documentos o FAISS procura inicialmente.
+K_BUSCA_SEMANTICA = 10
 
-# Mesmo modelo de embeddings usado na indexação — isso é OBRIGATÓRIO,
-# senão os vetores gerados na consulta não são comparáveis com os do índice.
-embeddings = HuggingFaceEmbeddings(model_name=NOME_MODELO_EMBEDDING)
+# Quantos documentos chegam ao LLM.
+K_DOCUMENTOS_FINAIS = 5
 
-# Carrega o índice já pronto do disco. allow_dangerous_deserialization=True
-# é necessário porque o FAISS usa pickle internamente — é seguro aqui
-# porque SOMOS NÓS que geramos esse arquivo (não veio de fonte externa).
+
+# ============================================================
+# EMBEDDINGS
+# ============================================================
+
+embeddings = HuggingFaceEmbeddings(
+    model_name=NOME_MODELO_EMBEDDING
+)
+
+
+# ============================================================
+# FAISS
+# ============================================================
+
 vectorstore = FAISS.load_local(
     PASTA_INDICE,
     embeddings,
     allow_dangerous_deserialization=True,
 )
 
-# k=3 -> busca só os 3 pedaços mais relevantes para cada pergunta.
-# É esse número que controla quanto contexto (= quantos tokens) vai
-# pro LLM a cada chamada. Comece com 3; se as respostas vierem
-# incompletas, tente subir para 4 ou 5.
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
+# ============================================================
+# DOCUMENTOS
+# ============================================================
 
-system_prompt = (
-    "Você é um assistente do sistema GTV, especializado em tirar dúvidas "
-    "sobre documentos. Responda a pergunta do usuário usando SOMENTE as "
-    "informações contidas no contexto abaixo. Não use conhecimento próprio, "
-    "não invente nem complete informações que não estejam explicitamente "
-    f"no contexto. Se a resposta não estiver clara no contexto, responda "
-    f"exatamente '{MARCADOR_NAO_SEI}' e nada mais — sem explicações extras. "
-    "Quando conseguir responder, seja direto e conciso, no máximo 5 frases."
-    "\n\n"
-    "Contexto:\n{context}"
+# Recupera os documentos armazenados no índice.
+#
+# Isso permite fazer uma busca textual complementar à busca
+# semântica do FAISS.
+
+todos_documentos = list(
+    vectorstore.docstore._dict.values()
 )
+
+
+# ============================================================
+# NORMALIZAÇÃO
+# ============================================================
+
+def normalizar_texto(texto: str) -> str:
+    """
+    Normaliza o texto para facilitar comparação de palavras.
+    """
+
+    texto = texto.lower()
+
+    texto = re.sub(
+        r"[^\w\s]",
+        " ",
+        texto,
+        flags=re.UNICODE,
+    )
+
+    texto = re.sub(
+        r"\s+",
+        " ",
+        texto,
+    )
+
+    return texto.strip()
+
+
+# ============================================================
+# BUSCA TEXTUAL
+# ============================================================
+
+def busca_textual(
+    pergunta: str,
+    documentos: list[Document],
+    limite: int = 10,
+) -> list[Document]:
+
+    pergunta_normalizada = normalizar_texto(
+        pergunta
+    )
+
+    palavras = {
+        palavra
+        for palavra in pergunta_normalizada.split()
+        if len(palavra) >= 3
+    }
+
+    resultados = []
+
+    for documento in documentos:
+
+        texto = normalizar_texto(
+            documento.page_content
+        )
+
+        pontuacao = 0
+
+        for palavra in palavras:
+
+            if palavra in texto:
+                pontuacao += 1
+
+        if pontuacao > 0:
+
+            resultados.append(
+                (
+                    pontuacao,
+                    documento,
+                )
+            )
+
+    resultados.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    return [
+        documento
+        for _, documento in resultados[:limite]
+    ]
+
+
+# ============================================================
+# BUSCA HÍBRIDA
+# ============================================================
+
+def buscar_documentos(
+    pergunta: str,
+) -> list[Document]:
+
+    documentos_finais = []
+
+    # --------------------------------------------------------
+    # BUSCA SEMÂNTICA
+    # --------------------------------------------------------
+
+    resultados_semanticos = (
+        vectorstore.similarity_search(
+            pergunta,
+            k=K_BUSCA_SEMANTICA,
+        )
+    )
+
+    # --------------------------------------------------------
+    # BUSCA TEXTUAL
+    # --------------------------------------------------------
+
+    resultados_textuais = busca_textual(
+        pergunta,
+        todos_documentos,
+        limite=K_BUSCA_SEMANTICA,
+    )
+
+    # --------------------------------------------------------
+    # COMBINA RESULTADOS
+    # --------------------------------------------------------
+
+    vistos = set()
+
+    resultados_combinados = (
+        resultados_semanticos
+        + resultados_textuais
+    )
+
+    for documento in resultados_combinados:
+
+        fonte = documento.metadata.get(
+            "source",
+            "",
+        )
+
+        pagina = documento.metadata.get(
+            "page",
+            "",
+        )
+
+        chave = (
+            fonte,
+            pagina,
+            documento.page_content[:100],
+        )
+
+        if chave in vistos:
+            continue
+
+        vistos.add(chave)
+
+        documentos_finais.append(
+            documento
+        )
+
+        if len(documentos_finais) >= K_DOCUMENTOS_FINAIS:
+            break
+
+    return documentos_finais
+
+
+# ============================================================
+# LLM
+# ============================================================
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0,
+    api_key=OPENAI_API_KEY,
+)
+
+
+# ============================================================
+# PROMPT
+# ============================================================
+
+system_prompt = f"""
+Você é um assistente especializado no sistema GTV.
+
+Sua função é responder dúvidas utilizando exclusivamente
+as informações presentes nos documentos fornecidos.
+
+REGRAS:
+
+1. Use SOMENTE o contexto fornecido.
+
+2. Não invente informações.
+
+3. Não utilize conhecimento externo.
+
+4. Se o contexto possuir informação suficiente para responder,
+responda normalmente.
+
+5. Se não houver informação suficiente, responda exatamente:
+
+{MARCADOR_NAO_SEI}
+
+6. Não retorne {MARCADOR_NAO_SEI} quando for possível responder
+com segurança utilizando parte das informações presentes.
+
+7. Para perguntas sobre procedimentos, apresente as etapas
+descritas nos documentos.
+
+8. Seja direto e claro.
+
+9. Não mencione o contexto, FAISS, RAG, embeddings ou documentos
+internos.
+
+10. Não ultrapasse 5 frases, salvo quando uma lista de etapas
+for necessária.
+
+CONTEXTO:
+
+{{context}}
+"""
+
 
 prompt = ChatPromptTemplate.from_messages(
     [
-        ("system", system_prompt),
-        ("human", "{input}"),
+        (
+            "system",
+            system_prompt,
+        ),
+        (
+            "human",
+            "{input}",
+        ),
     ]
 )
 
-question_answer_chain = create_stuff_documents_chain(llm, prompt)
-rag_chain = create_retrieval_chain(retriever, question_answer_chain)
 
-# ---------------------------------------------------------------
-# Isso roda a cada pergunta
-# ---------------------------------------------------------------
+# ============================================================
+# CHAIN
+# ============================================================
+
+question_answer_chain = (
+    create_stuff_documents_chain(
+        llm,
+        prompt,
+    )
+)
 
 
-def answer_question(question: str) -> str:
+# ============================================================
+# RESPOSTA
+# ============================================================
+
+def answer_question(
+    question: str,
+) -> str:
     """
-    Busca os trechos mais relevantes no índice já carregado e gera
-    a resposta com o LLM. Retorna o marcador NAO_SEI (sem alterações)
-    quando o modelo não encontrou a resposta no contexto — é esse
-    retorno que o webhook usa para decidir se aciona um atendente humano.
+    Busca documentos relevantes e gera a resposta.
     """
-    resultado = rag_chain.invoke({"input": question})
-    return resultado["answer"].strip()
+
+    documentos = buscar_documentos(
+        question
+    )
+
+    if not documentos:
+        return MARCADOR_NAO_SEI
+
+    resultado = question_answer_chain.invoke(
+        {
+            "input": question,
+            "context": documentos,
+        }
+    )
+
+    return resultado.strip()
 
 
-def precisa_de_atendente_humano(resposta: str) -> bool:
-    """Função utilitária: centraliza a checagem do marcador NAO_SEI."""
-    return resposta.strip().upper() == MARCADOR_NAO_SEI
+# ============================================================
+# ATENDIMENTO HUMANO
+# ============================================================
+
+def precisa_de_atendente_humano(
+    resposta: str,
+) -> bool:
+
+    return (
+        resposta.strip().upper()
+        == MARCADOR_NAO_SEI
+    )
